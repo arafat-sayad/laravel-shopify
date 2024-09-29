@@ -6,12 +6,8 @@
 - [Docker Services](#docker-services)
 - [Requirements](#requirements)
 - [Stop & Remove all the containers (optional)](#stop--remove-all-the-containers-optional)
-- [Installation](#installation)
 - [File Overview](#file-overview)
-- [Setup App and Web for HTTPS](#setup--app-and-web-for-https)
-- [Setup App and Web for SSH](#setup-app-and-web-for-ssh)
-- [Browser Access](#browser-access)
-- [Stopping Services](#stopping-services)
+- [Installation](installation#)
 
 ## Introduction
 
@@ -50,7 +46,7 @@ docker rm $(docker ps -a -q)
 The project structure looks like this:
 
 ```shell
-boilerplate-Docker
+Docker-Swarm
 ├── .docker
 ├── app
 │   └── all app files
@@ -62,7 +58,7 @@ boilerplate-Docker
 └── make-ssl.sh.example
 ```
 
-## Install Docker (if not already installed)
+## installation docker leader(Manager) and worker (if not already installed)
 
 ```shell
 sudo apt update
@@ -76,7 +72,7 @@ sudo systemctl enable docker
 sudo systemctl start docker
 ```
 
-## Initialize the Docker Swarm
+## Initialize the Docker Swarm leader(Manager) and worker
 
 On the manager node (one of your vm or instance), initialize the Docker Swarm:
 
@@ -118,9 +114,142 @@ ljb1xqaermbz6ib0h0    ubuntu-2   Ready     Active                          27.3.
 
 ```
 
+## Create a Docker Swarm Overlay Network
+
+Now that Swarm is initialized, you need to create an overlay network. This network will enable your containers to communicate with each other across different nodes in the Swarm.
+
+Run the following command to create the network:
+
+```shell
+docker network create -d overlay --attachable my_overlay_network
+```
+
+- -d overlay: Specifies that it is an overlay network.
+- --attachable: Allows standalone containers to attach to this network.
+
+- This creates a new network called `my_overlay_network` that will span across all nodes in the Swarm.
+  Ensure that the `docker-compose.yml` specifies external: true under networks to use the external Swarm network.
+
+## Create Volumes in Docker Swarm
+
+For Docker Swarm, volume handling is similar to standalone `Docker Compose`. The volumes you defined in the `docker-compose.yml (e.g., ./app, ./.data/redis, etc.)` will be mounted automatically when you deploy the stack.
+
+If you need shared volumes across multiple nodes, ensure you're using a distributed storage solution like `NFS or a Docker volume plugin like GlusterFS. Otherwise, local volumes` will be limited to the node where the container is running.
+
+## Setup NFS Docker volume all node manager and worker
+
+Step 1: Set Up NFS Server on Leader Node
+
+- Install NFS Server on the Leader Node:
+
+```shell
+sudo apt update
+sudo apt install nfs-kernel-server -y
+```
+
+- Create the NFS Shared Directory:
+
+Create the directory /`sites/zcart/app` to share with the other swarm nodes.
+
+```shell
+sudo mkdir -p /sites/zcart/app
+```
+
+- Give Proper Permissions:
+
+Set appropriate ownership and permissions for the shared directory.
+
+```shell
+sudo chmod 777 /sites/zcart/app
+```
+
+- Configure NFS Exports:
+
+```shell
+sudo nano /etc/exports
+
+/sites/zcart/app managerip(rw,sync,no_subtree_check,insecure) workerip(rw,sync,no_subtree_check,insecure)
+```
+
+- Export the Shared Directory:
+
+Export the shared directory using the following command:
+
+```shell
+sudo exportfs -a
+```
+
+- Start the NFS Server:
+
+Start the NFS service and ensure it starts on boot:
+
+```shell
+sudo systemctl restart nfs-kernel-server
+sudo systemctl enable nfs-kernel-server
+sudo systemctl restart nfs-kernel-server
+```
+
+Step 2: Mount NFS on Worker Nodes
+
+On each worker node (and the leader node itself, if needed), you need to mount the NFS share.
+
+Install NFS Client on All Worker Nodes:
+
+On each node, run the following commands:
+
+```shell
+sudo apt update
+sudo apt install nfs-kernel-server -y
+```
+
+- Create the NFS Shared Directory:
+
+Create the directory /`sites/zcart/app` to share with the other swarm nodes.
+
+```shell
+sudo mkdir -p /sites/zcart/app
+```
+
+- Give Proper Permissions:
+
+Set appropriate ownership and permissions for the shared directory.
+
+```shell
+sudo chmod 777 /sites/zcart/app
+```
+
+Mount the NFS Share:
+
+- Manually mount the NFS share from the leader node to the worker node:
+
+```shell
+sudo mount managerip:/sites/zcart/app /sites/zcart/app
+```
+
+- Verify the Mount:
+
+```shell
+df -h
+```
+
+Step 3: Update Your `docker-compose.yml` File
+
+Now that the NFS share is set up, you need to configure your docker-compose.yml file to use it as a volume.
+
+```shell
+volumes:
+  app_data:
+    driver_opts:
+      type: "nfs"
+      o: "addr=157.230.221.85,rw,insecure,vers=3"
+      device: ":/sites/zcart/app"
+  db_data:
+    external: true
+```
+
 ## Deploy a Stack or Services to the Swarm laravel application
 
-Once your network and Swarm are set up, you can deploy services to the Swarm. Here’s an example using Docker Compose to deploy services on the Swarm.
+Once your network, volume and Swarm are set up, you can deploy services to the Swarm. Here’s an example using Docker Compose to deploy services on the Swarm.
 
 - Create a docker-compose.yml file (on the manager node):
 
@@ -225,7 +354,10 @@ services:
 
 volumes:
   app_data:
-    external: true
+    driver_opts:
+      type: "nfs"
+      o: "addr=(Manager ip for nfs),rw,insecure,vers=3"
+      device: ":/sites/zcart/app"
   db_data:
     external: true
 
@@ -234,33 +366,11 @@ networks:
     external: true
 ```
 
-## Create a Docker Swarm Overlay Network
-
-Now that Swarm is initialized, you need to create an overlay network. This network will enable your containers to communicate with each other across different nodes in the Swarm.
-
-Run the following command to create the network:
-
-```shell
-docker network create -d overlay --attachable my_overlay_network
-```
-
-- -d overlay: Specifies that it is an overlay network.
-- --attachable: Allows standalone containers to attach to this network.
-
-- This creates a new network called `my_overlay_network` that will span across all nodes in the Swarm.
-  Ensure that the `docker-compose.yml` specifies external: true under networks to use the external Swarm network.
-
 ## Key Points
 
 - Mounting the Volume: The volume `app_data` is defined as an external volume in the volumes section. It is then mounted into the `nginx, app, and worker services` at `/var/www/app`. You can modify this path according to where you want the volume to be mounted inside the container.
 
 - Overlay Network: The network `my_overlay_network` is defined as `external`, meaning it's an existing network you've already created with Docker Swarm `(docker network create -d overlay --attachable my_overlay_network)`. This ensures that the services communicate over the Swarm overlay network.
-
-## Create Volumes in Docker Swarm
-
-For Docker Swarm, volume handling is similar to standalone `Docker Compose`. The volumes you defined in the `docker-compose.yml (e.g., ./app, ./.data/redis, etc.)` will be mounted automatically when you deploy the stack.
-
-If you need shared volumes across multiple nodes, ensure you're using a distributed storage solution like `NFS or a Docker volume plugin like GlusterFS. Otherwise, local volumes` will be limited to the node where the container is running.
 
 ## How the build Works in the Compose File
 
@@ -300,8 +410,8 @@ You can specify a particular service to build:
 docker-compose build app
 ```
 
-- note: Build the Images Manually
-  Before deploying your stack, you need to manually build your images and push them to a Docker registry (e.g., Docker Hub or a private registry).
+**Note**: Build the Images Manually
+Before deploying your stack, you need to manually build your images and push them to a Docker registry (e.g., Docker Hub or a private registry).
 
 - For example:
 
@@ -314,6 +424,7 @@ docker push your-dockerhub-username/your-app-image:latest
 
 Update your `docker-compose.yml` file to remove the build section and replace it with the image section, referring to the images you just pushed to your registry.
 
+I have a create a new docker-compose-swarm.yml.
 Updated docker-compose-swarm.yml:
 
 ```shell
@@ -437,116 +548,7 @@ networks:
     external: true
 ```
 
-## Setup Docker volume all node manager and worker
-
-Step 1: Set Up NFS Server on Leader Node
-
-- Install NFS Server on the Leader Node:
-
-```shell
-sudo apt update
-sudo apt install nfs-kernel-server -y
-```
-
-- Create the NFS Shared Directory:
-
-Create the directory /`sites/zcart/app` to share with the other swarm nodes.
-
-```shell
-sudo mkdir -p /sites/zcart/app
-```
-
-- Give Proper Permissions:
-
-Set appropriate ownership and permissions for the shared directory.
-
-```shell
-sudo chmod 755 /sites/zcart/app
-```
-
-- Configure NFS Exports:
-
-```shell
-/sites/zcart/app managerip(rw,sync,no_subtree_check,insecure) workerip(rw,sync,no_subtree_check,insecure)
-```
-
-- Export the Shared Directory:
-
-Export the shared directory using the following command:
-
-```shell
-sudo exportfs -a
-```
-
-- Start the NFS Server:
-
-Start the NFS service and ensure it starts on boot:
-
-```shell
-sudo systemctl restart nfs-kernel-server
-sudo systemctl enable nfs-kernel-server
-sudo systemctl restart nfs-kernel-server
-```
-
-Step 2: Mount NFS on Worker Nodes
-
-On each worker node (and the leader node itself, if needed), you need to mount the NFS share.
-
-Install NFS Client on All Worker Nodes:
-
-On each node, run the following commands:
-
-```shell
-sudo apt update
-sudo apt install nfs-kernel-server -y
-```
-
-- Create the NFS Shared Directory:
-
-Create the directory /`sites/zcart/app` to share with the other swarm nodes.
-
-```shell
-sudo mkdir -p /sites/zcart/app
-```
-
-- Give Proper Permissions:
-
-Set appropriate ownership and permissions for the shared directory.
-
-```shell
-sudo chmod 777 /sites/zcart/app
-```
-
-Mount the NFS Share:
-
-- Manually mount the NFS share from the leader node to the worker node:
-
-```shell
-sudo mount managerip:/sites/zcart/app /sites/zcart/app
-```
-
-- Verify the Mount:
-
-```shell
-df -h
-```
-
-Step 3: Update Your `docker-compose-swarm.yml` File
-
-Now that the NFS share is set up, you need to configure your docker-compose-swarm.yml file to use it as a volume.
-
-```shell
-volumes:
-  app_data:
-    driver_opts:
-      type: "nfs"
-      o: "addr=157.230.221.85,rw,insecure,vers=3"
-      device: ":/sites/zcart/app"
-  db_data:
-    external: true
-```
-
-Step 4: Deploy the Stack
+Step 3: Deploy the Stack
 
 - After modifying the `docker-compose-swarm.yml` file, redeploy your stack:
 
@@ -559,26 +561,33 @@ Step 5: Verify the Setup
 Check if the volume is properly mounted and shared across all nodes:
 
 ```shell
+docker node ls
+docker node inspect <node_id> --pretty
 docker service ls
+docker stack services laravel_zcart
 docker service ps laravel_zcart_app
+docker service logs <service_name>
 docker stats
 docker service scale <service_name>=<replica_count>
 ```
+
 check running service and replica for manager
-``` shell
+
+```shell
 root@ubuntu-1:/sites/zcart# docker service ls
 ID             NAME                     MODE         REPLICAS   IMAGE                        PORTS
-w9yzc542t6r6   laravel_zcart_app        replicated   5/5        sayad1/zcart-app:latest      
-lnnql8lu98r3   laravel_zcart_certbot    replicated   1/1        certbot/certbot:latest       
+w9yzc542t6r6   laravel_zcart_app        replicated   5/5        sayad1/zcart-app:latest
+lnnql8lu98r3   laravel_zcart_certbot    replicated   1/1        certbot/certbot:latest
 luwoh0jpapfo   laravel_zcart_database   replicated   1/1        postgres:16                  *:5432->5432/tcp
 g3ncecpcocf2   laravel_zcart_nginx      replicated   1/1        nginx:latest                 *:80->80/tcp, *:443->443/tcp
 wiqjny28bosa   laravel_zcart_redis      replicated   1/1        redis:latest                 *:6379->6379/tcp
-ll59selz4mwy   laravel_zcart_worker     replicated   3/3        sayad1/zcart-worker:latest   
-root@ubuntu-1:/sites/zcart# 
+ll59selz4mwy   laravel_zcart_worker     replicated   3/3        sayad1/zcart-worker:latest
+root@ubuntu-1:/sites/zcart#
 ```
+
 check running service and replica for manager
 
-``` shell
+```shell
 root@ubuntu-1:/sites/zcart# docker ps -a
 CONTAINER ID   IMAGE                        COMMAND                  CREATED       STATUS       PORTS             NAMES
 4b60cd56fae6   sayad1/zcart-app:latest      "/usr/bin/startx.sh"     2 hours ago   Up 2 hours   9000/tcp          laravel_zcart_app.4.o1zwdztujv3377krhj10m2y3i
@@ -588,15 +597,15 @@ fb5ad5f55778   sayad1/zcart-worker:latest   "docker-php-entrypoi…"   2 hours a
 2b146622ee34   sayad1/zcart-app:latest      "/usr/bin/startx.sh"     2 hours ago   Up 2 hours   9000/tcp          laravel_zcart_app.1.td1h5rc8x1d1fudwezxsr3u3m
 95f06aacf448   certbot/certbot:latest       "/bin/sh -c 'trap ex…"   2 hours ago   Up 2 hours   80/tcp, 443/tcp   laravel_zcart_certbot.1.ckzalo89skl2e8x6it06m9gvj
 ba4d86d3054d   redis:latest                 "redis-server --appe…"   2 hours ago   Up 2 hours   6379/tcp          laravel_zcart_redis.1.xzfhq4citulleapr269d2ybrm
-root@ubuntu-1:/sites/zcart# 
+root@ubuntu-1:/sites/zcart#
 ```
 
-## worker 
-``` shell
+## worker
+
+```shell
 4ddd4402748c   sayad1/zcart-worker:latest   "docker-php-entrypoi…"   2 hours ago   Up 2 hours               9000/tcp   laravel_zcart_worker.2.2528xfr0pzmbsqqz740djpypu
 528658c02fad   sayad1/zcart-worker:latest   "docker-php-entrypoi…"   2 hours ago   Up 2 hours               9000/tcp   laravel_zcart_worker.3.ubwg03op5fb3o69u17gqspi8b
 f1b2fc55cba6   sayad1/zcart-app:latest      "/usr/bin/startx.sh"     2 hours ago   Up 2 hours               9000/tcp   laravel_zcart_app.3.x0u7fjiuui39qisu2863fmwzx
 7b4382bd1b72   sayad1/zcart-app:latest      "/usr/bin/startx.sh"     2 hours ago   Up 2 hours               9000/tcp   laravel_zcart_app.2.719kffqziyfbl9civul0jk1sf
-root@ubuntu-2:/sites/zcart# 
+root@ubuntu-2:/sites/zcart#
 ```
-
